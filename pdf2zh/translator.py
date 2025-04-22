@@ -304,14 +304,22 @@ if NLLB_AVAILABLE:
             logger.info(f"NLLBTranslator initialized for {self.nllb_lang_in} -> {self.nllb_lang_out} using model {self.required_model_name} on device {self.required_device}")
             # Проверяем наличие кодов языков
             if not hasattr(self, '_checked_langs') or not self._checked_langs:
-                 # Загружаем токенизатор временно, только для проверки кодов (если модель еще не загружена)
-                 temp_tokenizer = AutoTokenizer.from_pretrained(self.required_model_name)
-                 if self.nllb_lang_in not in temp_tokenizer.lang_code_to_id:
-                      raise ValueError(f"Source language code '{self.nllb_lang_in}' not supported by NLLB model '{self.required_model_name}'. Check Flores-200 codes.")
-                 if self.nllb_lang_out not in temp_tokenizer.lang_code_to_id:
-                     raise ValueError(f"Target language code '{self.nllb_lang_out}' not supported by NLLB model '{self.required_model_name}'. Check Flores-200 codes.")
-                 del temp_tokenizer # Освобождаем память
-                 self._checked_langs = True # Проверили один раз
+                try:
+                    temp_tokenizer = AutoTokenizer.from_pretrained(self.required_model_name)
+                    # Проверяем, может ли токенизатор обработать код языка как токен
+                    src_token_id = temp_tokenizer.convert_tokens_to_ids(self.nllb_lang_in)
+                    if src_token_id == temp_tokenizer.unk_token_id: # Сравниваем с ID неизвестного токена
+                         raise ValueError(f"Source language code '{self.nllb_lang_in}' is not recognized as a valid token by NLLB tokenizer '{self.required_model_name}'. Check Flores-200 codes.")
+
+                    tgt_token_id = temp_tokenizer.convert_tokens_to_ids(self.nllb_lang_out)
+                    if tgt_token_id == temp_tokenizer.unk_token_id:
+                        raise ValueError(f"Target language code '{self.nllb_lang_out}' is not recognized as a valid token by NLLB tokenizer '{self.required_model_name}'. Check Flores-200 codes.")
+
+                    del temp_tokenizer # Освобождаем память
+                    self._checked_langs = True # Проверили один раз
+                except Exception as e:
+                     logger.error(f"Failed during NLLB language code check for model '{self.required_model_name}': {e}", exc_info=True)
+                     raise # Проверили один раз
 
 
         def _ensure_model_loaded(self):
@@ -333,13 +341,16 @@ if NLLB_AVAILABLE:
                 self.tokenizer.src_lang = self.nllb_lang_in
                 inputs = self.tokenizer(text, return_tensors="pt")
 
-                # Получаем ID токена целевого языка
-                target_lang_token_id = self.tokenizer.lang_code_to_id[self.nllb_lang_out]
+                # Получаем ID токена целевого языка (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+                target_lang_token_id = self.tokenizer.convert_tokens_to_ids(self.nllb_lang_out)
+                # Добавим проверку на случай, если код некорректен (хотя он проверялся в __init__)
+                if target_lang_token_id == self.tokenizer.unk_token_id:
+                    raise ValueError(f"Cannot get token ID for target language '{self.nllb_lang_out}'")
 
                 # Генерируем перевод
                 translated_tokens = self.model.generate(
                     **inputs.to(self.model.device), # Передаем данные на устройство модели
-                    forced_bos_token_id=target_lang_token_id,
+                    forced_bos_token_id=target_lang_token_id, # Используем полученный ID
                     max_length=max(50, len(text) * 3) # Динамическая максимальная длина
                 )
 
